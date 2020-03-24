@@ -327,7 +327,7 @@ class MirrorIssueSet(object):
           if gh_label:
             valid_labels.append(gh_label)
 
-        issue_info['labels'] = valid_labels
+        issue_info['labels'] = sorted(valid_labels, key=lambda label: label.name)
 
         # Ensure we include a link to the bugzilla bug for reference.
         issue_info['body'] += SYNCED_ISSUE_TEXT.format(**bug_info)
