@@ -27,11 +27,12 @@ import requests
 from github import Github
 
 DRY_RUN = False
-VERBOSE_DEBUG = False
+VERBOSE_DEBUG = True
 
-GH_REPO = 'ktaeleman/planning-test'
+GH_REPO = 'FirefoxGraphics/planning'
 GH_OLD_REPOS = []
 GH_LABEL = 'bugzilla'
+GH_BZLABEL_PREFIX = 'BZ_'
 
 BZ_URL = 'https://bugzilla.mozilla.org/rest'
 
@@ -47,7 +48,7 @@ SYNCED_ISSUE_CLOSE_COMMENT = 'Upstream bug has been closed with the following re
 JIRA_ISSUE_MARKER = '\N{BOX DRAWINGS LIGHT TRIPLE DASH VERTICAL}'
 
 # For now, only look at recent bugs in order to preserve sanity.
-MIN_CREATION_TIME = '20190801'
+MIN_CREATION_TIME = '20200201'
 
 
 def log(msg, *args, **kwds):
@@ -107,7 +108,7 @@ class BugSet(object):
         # a public github issue, even for confidential bugzilla bugs.
         # This is the only query that's allowed to use a BZ API token to access
         # confidential bug info.
-        url = BZ_URL + '/bug?include_fields=id,is_open,see_also'
+        url = BZ_URL + '/bug?include_fields=id,is_open,see_also,whiteboard'
         url += '&' + self._make_query_string(**kwds)
         if self.api_key is not None:
             url += '&api_key=' + self.api_key
@@ -144,9 +145,9 @@ class BugSet(object):
                 for bugnum, bug in get_json(url)['bugs'].items():
                     bugid = str(bugnum)
                     self.bugs[bugid]['comment0'] = bug['comments'][0]['text']
-
+# https://bugzilla.mozilla.org/buglist.cgi?resolution=---&query_format=advanced&list_id=15164984&status_whiteboard_type=allwordssubstr&classification=Client%20Software&classification=Developer%20Infrastructure&classification=Components&classification=Server%20Software&classification=Other&status_whiteboard=zever
     def _make_query_string(self, product=None, component=None, id=None, resolved=None,
-                           creation_time=None, last_change_time=None):
+                           creation_time=None, last_change_time=None, whiteboard=None):
         def listify(x): return x if isinstance(x, (list, tuple, set)) else (x,)
 
         def encode(x): return urllib.parse.quote(x, safe='')
@@ -161,6 +162,9 @@ class BugSet(object):
             qs.append('creation_time=' + creation_time)
         if last_change_time is not None:
             qs.append('last_change_time=' + last_change_time)
+        if whiteboard is not None:
+            qs.append('status_whiteboard_type=anywords');
+            qs.append('status_whiteboard=' + " ".join([label for label in whiteboard]))
         if resolved is not None:
             if resolved:
                 raise ValueError(
@@ -192,11 +196,17 @@ class MirrorIssueSet(object):
         self._gh = Github(api_key)
         self._repo = self._gh.get_repo(repo)
         self._repo_name = repo
+        self._labels = self._repo.get_labels()
         self._label = self._repo.get_label(label)
         self._see_also_regex = re.compile(
             SEE_ALSO_ISSUE_REGEX_TEMPLATE.format(repo))
         # The mirror issues, indexes by bugzilla bugid.
         self.mirror_issues = {}
+
+    def get_bugzilla_sync_labels(self):
+        """Get all the BZ_ bugzilla whiteboard labels defined in Github that this repository wants to sync"""
+        bz_labels = list(filter(lambda label: label.name.startswith(GH_BZLABEL_PREFIX), self._labels))
+        return [label.name[len(GH_BZLABEL_PREFIX):] for label in bz_labels]
 
     def sync_from_bugset(self, bugs, updates_only=False):
         """Sync the mirrored issues with the given BugSet (which might be modified in-place)."""
@@ -304,6 +314,21 @@ class MirrorIssueSet(object):
             if self._label not in issue.labels:
                 issue_info['labels'].append(self._label)
 
+        # if we have a whiteboard tag, make sure there is a corresponding Github label and remove labels that are no longer present
+        valid_labels = []
+        for label in issue_info['labels']:
+          if not label.name.startswith(GH_BZLABEL_PREFIX):
+            valid_labels.append(label)
+
+        for label in re.split('[\s,;]+', bug_info['whiteboard']):
+          gh_label_name = GH_BZLABEL_PREFIX + label.strip()
+          # only add BZ_ whiteboard label if it exists in the github labels
+          gh_label = next((x for x in self._labels if x.name == gh_label_name), None)
+          if gh_label:
+            valid_labels.append(gh_label)
+
+        issue_info['labels'] = valid_labels
+
         # Ensure we include a link to the bugzilla bug for reference.
         issue_info['body'] += SYNCED_ISSUE_TEXT.format(**bug_info)
 
@@ -321,15 +346,18 @@ class MirrorIssueSet(object):
 
 def sync_bugzilla_to_github():
     # Find the sets of bugs in bugzilla that we want to mirror.
+    gh_token = os.environ.get('GITHUB_TOKEN')
+
     log('Finding relevant bugs in bugzilla...')
     bugs = BugSet(os.environ.get('BZ_API_KEY'))
-    bugs.update_from_bugzilla(product='Core', component='Panning and Zooming',
-                              resolved=False, creation_time=MIN_CREATION_TIME)
+    issues = MirrorIssueSet(GH_REPO, GH_LABEL, gh_token)
+    bugs.update_from_bugzilla(product='Core',
+                              resolved=False, whiteboard=issues.get_bugzilla_sync_labels())
     # bugs.update_from_bugzilla(product='Firefox', component='Sync',
     #                           resolved=False, creation_time=MIN_CREATION_TIME)
     log('Found {} bugzilla bugs', len(bugs))
 
-    gh_token = os.environ.get('GITHUB_TOKEN')
+
 
     # Find any that are already represented in old github repos.
     # We don't want to make duplicates of them in the current repo!
@@ -345,7 +373,7 @@ def sync_bugzilla_to_github():
         log('Synced {} bugs, now {} left to sync', done_count, len(bugs))
 
     log('Syncing to github repo at {}', GH_REPO)
-    issues = MirrorIssueSet(GH_REPO, GH_LABEL, gh_token)
+
     issues.sync_from_bugset(bugs)
     log('Done!')
 
