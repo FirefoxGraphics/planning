@@ -1,4 +1,6 @@
-# planning
+# Planning 
+
+## Bugzilla to Github script
 
 This script synchronizes Bugzilla bugs to Github using whiteboard labels.
 
@@ -13,4 +15,6 @@ This allows us to drag the issues into [github projects](https://github.com/orgs
 It seems like Github remembers the last card query, making it easy to drag in cards that aren't on the board yet.
 
 You can also setup the project to automatically move issues that are closed to the done column by setting up automation in that column. An example of that can be found on the [APZ project](https://github.com/orgs/FirefoxGraphics/projects/7).
+
+This script is run every 15 minutes.
 
