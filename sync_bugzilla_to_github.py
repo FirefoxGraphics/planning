@@ -24,12 +24,16 @@ import os
 import urllib.parse
 
 import requests
+import json
 from github import Github
 
-DRY_RUN = False
+DRY_RUN = True
+CARDS_DRY_RUN = False
+FORCE_CARDS_SYNC = True
 VERBOSE_DEBUG = True
 
 GH_REPO = 'FirefoxGraphics/planning'
+GH_ORG = 'FirefoxGraphics'
 GH_OLD_REPOS = []
 GH_LABEL = 'bugzilla'
 GH_BZLABEL_PREFIX = 'BZ_'
@@ -48,8 +52,9 @@ SYNCED_ISSUE_CLOSE_COMMENT = 'Upstream bug has been closed with the following re
 JIRA_ISSUE_MARKER = '\N{BOX DRAWINGS LIGHT TRIPLE DASH VERTICAL}'
 
 # For now, only look at recent bugs in order to preserve sanity.
-MIN_CREATION_TIME = '20200201'
+# MIN_CREATION_TIME = '20200201'
 
+config_data = {}
 
 def log(msg, *args, **kwds):
     msg = str(msg)
@@ -62,6 +67,12 @@ def get_json(url):
     r.raise_for_status()
     return r.json()
 
+def translate_bmo_user_to_gh(bmo_mail):
+  global config_data
+  for user in config_data["bmo_to_bugzilla"]:
+    if (user["bmo_mail"] == bmo_mail):
+      return user["gh_user"]
+  return ""
 
 class BugSet(object):
     """A set of bugzilla bugs, which we might like to mirror into GitHub.
@@ -84,6 +95,7 @@ class BugSet(object):
         * `summary`: The one-line bug summry, as a string
         * `status`: The bug's status field, as a string
         * `comment0`: The bug's first comment, which is typically a longer description, as a string
+        * `assignee`: The person this issue is currently assigned to
     """
 
     def __init__(self, api_key=None):
@@ -125,7 +137,7 @@ class BugSet(object):
         # silently omitted from this query.
         if found_bugs:
             public_bugs = set()
-            url = BZ_URL + '/bug?include_fields=id,is_open,see_also,summary,status,resolution'
+            url = BZ_URL + '/bug?include_fields=id,is_open,see_also,summary,status,resolution,assigned_to'
             url += '&id=' + '&id='.join(found_bugs)
             for bug in get_json(url)['bugs']:
                 bugid = str(bug['id'])
@@ -145,7 +157,7 @@ class BugSet(object):
                 for bugnum, bug in get_json(url)['bugs'].items():
                     bugid = str(bugnum)
                     self.bugs[bugid]['comment0'] = bug['comments'][0]['text']
-# https://bugzilla.mozilla.org/buglist.cgi?resolution=---&query_format=advanced&list_id=15164984&status_whiteboard_type=allwordssubstr&classification=Client%20Software&classification=Developer%20Infrastructure&classification=Components&classification=Server%20Software&classification=Other&status_whiteboard=zever
+
     def _make_query_string(self, product=None, component=None, id=None, resolved=None,
                            creation_time=None, last_change_time=None, whiteboard=None):
         def listify(x): return x if isinstance(x, (list, tuple, set)) else (x,)
@@ -164,7 +176,7 @@ class BugSet(object):
             qs.append('last_change_time=' + last_change_time)
         if whiteboard is not None:
             qs.append('status_whiteboard_type=anywords');
-            qs.append('status_whiteboard=' + " ".join([label for label in whiteboard]))
+            qs.append('status_whiteboard=' + " ".join([label["name"] for label in whiteboard]))
         if resolved is not None:
             if resolved:
                 raise ValueError(
@@ -192,12 +204,28 @@ class MirrorIssueSet(object):
     bugzilla.
     """
 
-    def __init__(self, repo, label, api_key=None):
+    def __init__(self, repo, org, label, api_key=None):
         self._gh = Github(api_key)
         self._repo = self._gh.get_repo(repo)
         self._repo_name = repo
         self._labels = self._repo.get_labels()
         self._label = self._repo.get_label(label)
+
+        self._org = self._gh.get_organization(org)
+        self._projects = []
+        projects = self._org.get_projects()
+        for project in projects:
+          project_info = {}
+          project_info["project"] = project
+          project_info["columns"] = []
+          columns = project.get_columns()
+          for column in columns:
+            column_info = {}
+            column_info["column"] = column
+            column_info["cards"] = column.get_cards()
+            project_info["columns"].append(column_info)
+          self._projects.append(project_info)
+
         self._see_also_regex = re.compile(
             SEE_ALSO_ISSUE_REGEX_TEMPLATE.format(repo))
         # The mirror issues, indexes by bugzilla bugid.
@@ -206,7 +234,7 @@ class MirrorIssueSet(object):
     def get_bugzilla_sync_labels(self):
         """Get all the BZ_ bugzilla whiteboard labels defined in Github that this repository wants to sync"""
         bz_labels = list(filter(lambda label: label.name.startswith(GH_BZLABEL_PREFIX), self._labels))
-        return [label.name[len(GH_BZLABEL_PREFIX):] for label in bz_labels]
+        return [{ "name": label.name[len(GH_BZLABEL_PREFIX):], "project": label.description} for label in bz_labels]
 
     def sync_from_bugset(self, bugs, updates_only=False):
         """Sync the mirrored issues with the given BugSet (which might be modified in-place)."""
@@ -251,9 +279,73 @@ class MirrorIssueSet(object):
                 continue
             self.mirror_issues[bugid] = issue
 
+    def get_project_from_label(self, label):
+        for project in self._projects:
+          if "[project=" + str(project["project"].name).lower() + "]" in label.description.lower():
+            return project
+        return None
+
+    def get_card_from_issue(self, project, issue):
+        for column in project["columns"]:
+          for card in column["cards"]:
+            if card.get_content() == issue:
+              return column, card
+        return None, None
+
+    def get_column_for_issue(self, project, issue, is_assigned):
+        # Determine in which column the issue should be
+        if issue.state == 'open':
+          if is_assigned:
+            targetcolumns = [column for column in project["columns"] if column["column"].name.lower() == "in progress"]
+            return None if len(targetcolumns) == 0 else targetcolumns[0]
+          else:
+            targetcolumns = [column for column in project["columns"] if column["column"].name.lower() == "not started" or column["column"].name.lower() == "to do"]
+            return None if len(targetcolumns) == 0 else targetcolumns[0]
+        else:
+          targetcolumns = [column for column in project["columns"] if column["column"].name.lower() == "done"]
+          return None if len(targetcolumns) == 0 else targetcolumns[0]
+
+    def update_cards_for_issue(self, issue, is_assigned):
+        for label in issue.get_labels():
+          project = self.get_project_from_label(label)
+          if project:
+            current_column, card = self.get_card_from_issue(project, issue)
+            target_column = self.get_column_for_issue(project, issue, is_assigned)
+            if not card and target_column:
+              if VERBOSE_DEBUG:
+                log('Creating card for issue #{} in {} - {}', issue.number, project['project'].name, target_column['column'].name)
+              if not CARDS_DRY_RUN:
+                target_column["column"].create_card(content_type = "Issue", content_id = issue.id)
+            elif target_column and current_column != target_column:
+              is_custom_column = not current_column['column'].name.lower() in ['not done', 'to do', 'in progress', 'done']
+              # When the issue is in a custom named column, only allow moves to in progress and done. This could be a sprint planning column.
+              if not is_custom_column:
+                if VERBOSE_DEBUG:
+                  log('Moving card for issue #{} in {} - {}', issue.number, project['project'].name, target_column['column'].name)
+                if not CARDS_DRY_RUN:
+                  # card.move api does not work, delete/create for now.
+                  # Should try move in the future: card.move("bottom", target_column["column"].id)
+                  card.delete()
+                  card = target_column['column'].create_card(content_type = "Issue", content_id = issue.id)
+              elif VERBOSE_DEBUG:
+                  log('Not moving card due to custom column for issue #{} in {} - {}', issue.number, project['project'].name, current_column['column'].name)
+
+    def compare_issues(self, issue_info, issue):
+        changed_fields = []
+        for field in issue_info:
+          if field == 'assignee':
+            old = issue.assignee.login if issue.assignee else ""
+            new = issue_info.get('assignee', "")
+            if (old != new):
+              changed_fields.append(field)
+          elif issue_info[field] != getattr(issue, field):
+            changed_fields.append(field)
+        return changed_fields
+
     def sync_issue_from_bug_info(self, bugid, bug_info):
         issue = self.mirror_issues.get(bugid, None)
         issue_info = self._format_issue_info(bug_info, issue)
+        is_assigned = bug_info.get('assigned_to', "") != "nobody@mozilla.org"
         if issue is None:
             if bug_info['is_open']:
                 # As a light hack, if the bugzilla bug has a "see also" link to an issue in our repo,
@@ -272,11 +364,11 @@ class MirrorIssueSet(object):
                         issue = {}
                     else:
                         issue = self._repo.create_issue(**issue_info)
+                        self.update_cards_for_issue(issue, is_assigned)
                     self.mirror_issues[bugid] = issue
                     return True
         else:
-            changed_fields = [
-                field for field in issue_info if issue_info[field] != getattr(issue, field)]
+            changed_fields = self.compare_issues(issue_info, issue)
             if changed_fields:
                 # Note that this will close issues that have not open in bugzilla.
                 log('Updating mirror issue #{} for bz{id} (changed: {})',
@@ -288,8 +380,11 @@ class MirrorIssueSet(object):
                     if not bug_info['is_open'] and 'state' in changed_fields and 'resolution' in bug_info:
                         issue.create_comment(SYNCED_ISSUE_CLOSE_COMMENT.format(resolution=bug_info['resolution']))
                     issue.edit(**issue_info)
+                    self.update_cards_for_issue(issue, is_assigned)
                 return True
             else:
+                if FORCE_CARDS_SYNC:
+                  self.update_cards_for_issue(issue, is_assigned)
                 if VERBOSE_DEBUG:
                     log('No change for issue #{}', issue.number)
         return False
@@ -306,6 +401,11 @@ class MirrorIssueSet(object):
             issue_info['body'] = bug_info['comment0']
         else:
             issue_info['body'] = 'No description is available for this confidential bugzilla issue.'
+
+        # only change assignee if the issue is still open
+        gh_user = translate_bmo_user_to_gh(bug_info['assigned_to'])
+        if gh_user != "" and issue_info['state'] == 'open':
+          issue_info['assignee'] = gh_user
 
         if issue is None:
             issue_info['labels'] = [self._label]
@@ -345,12 +445,18 @@ class MirrorIssueSet(object):
 
 
 def sync_bugzilla_to_github():
+    global config_data
     # Find the sets of bugs in bugzilla that we want to mirror.
     gh_token = os.environ.get('GITHUB_TOKEN')
 
+    # Load configuration
+    with open('config.json') as f:
+      config_data = json.load(f)
+
+
     log('Finding relevant bugs in bugzilla...')
     bugs = BugSet(os.environ.get('BZ_API_KEY'))
-    issues = MirrorIssueSet(GH_REPO, GH_LABEL, gh_token)
+    issues = MirrorIssueSet(GH_REPO, GH_ORG, GH_LABEL, gh_token)
     bugs.update_from_bugzilla(product='Core',
                               resolved=False, whiteboard=issues.get_bugzilla_sync_labels())
     # bugs.update_from_bugzilla(product='Firefox', component='Sync',

@@ -144,3 +144,6 @@ static
 
 # ignore vscode files
 .vscode/
+
+# ignore local config file
+config.json
