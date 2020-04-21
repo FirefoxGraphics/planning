@@ -27,7 +27,7 @@ import requests
 import json
 from github import Github
 
-DRY_RUN = True
+DRY_RUN = False
 CARDS_DRY_RUN = False
 FORCE_CARDS_SYNC = True
 VERBOSE_DEBUG = True
