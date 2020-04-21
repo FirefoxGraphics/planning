@@ -22,6 +22,8 @@
 import re
 import os
 import urllib.parse
+import sys
+import pprint
 
 import requests
 import json
@@ -485,4 +487,5 @@ def sync_bugzilla_to_github():
 
 
 if __name__ == "__main__":
+    pprint.pprint(sys.modules)
     sync_bugzilla_to_github()
