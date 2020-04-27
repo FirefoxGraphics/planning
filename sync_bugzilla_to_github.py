@@ -288,7 +288,7 @@ class MirrorIssueSet(object):
     def get_card_from_issue(self, project, issue):
         for column in project["columns"]:
           for card in column["cards"]:
-            if card.get_content() == issue:
+            if card.content_url == issue.url:
               return column, card
         return None, None
 
@@ -317,9 +317,9 @@ class MirrorIssueSet(object):
               if not CARDS_DRY_RUN:
                 target_column["column"].create_card(content_type = "Issue", content_id = issue.id)
             elif target_column and current_column != target_column:
-              is_custom_column = not current_column['column'].name.lower() in ['not done', 'to do', 'in progress', 'done']
+              is_custom_column = not current_column['column'].name.lower() in ['not started', 'to do', 'in progress', 'done']
               # When the issue is in a custom named column, only allow moves to in progress and done. This could be a sprint planning column.
-              if not is_custom_column:
+              if not is_custom_column or not target_column['column'].name.lower() in ['not started']:
                 if VERBOSE_DEBUG:
                   log('Moving card for issue #{} in {} - {}', issue.number, project['project'].name, target_column['column'].name)
                 if not CARDS_DRY_RUN:
