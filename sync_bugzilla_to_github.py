@@ -420,8 +420,10 @@ class MirrorIssueSet(object):
           if not label.name.startswith(GH_BZLABEL_PREFIX):
             valid_labels.append(label)
 
-        for label in re.split('[\s,;]+', bug_info['whiteboard']):
-          gh_label_name = GH_BZLABEL_PREFIX + label.strip()
+        for label in re.split(r'[\s,;]+', bug_info['whiteboard']):
+          # Remove special characters from label string so the bugzilla whiteboard syntax can be used (eg. [gfx-noted] [fenix:p1])
+          sanitized_label = label.translate({ord(c): None for c in '[:]'})
+          gh_label_name = "BZ_" + sanitized_label.strip()
           # only add BZ_ whiteboard label if it exists in the github labels
           gh_label = next((x for x in self._labels if x.name == gh_label_name), None)
           if gh_label:
