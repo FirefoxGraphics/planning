@@ -32,7 +32,7 @@ CARDS_DRY_RUN = False
 FORCE_CARDS_SYNC = True
 VERBOSE_DEBUG = True
 
-GH_USE_TEST_REPO = True
+GH_USE_TEST_REPO = False
 GH_REPO = 'FirefoxGraphics/planning'
 GH_ORG = 'FirefoxGraphics'
 GH_USER = None
