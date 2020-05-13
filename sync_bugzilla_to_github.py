@@ -532,9 +532,6 @@ def sync_bugzilla_to_github():
     # bugs.update_from_bugzilla(product='Firefox', component='Sync',
     #                           resolved=False, creation_time=MIN_CREATION_TIME)
     log('Found {} bugzilla bugs', len(bugs))
-    print(' '.join(bugs))
-
-
 
     # Find any that are already represented in old github repos.
     # We don't want to make duplicates of them in the current repo!
