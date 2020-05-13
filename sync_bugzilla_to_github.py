@@ -32,8 +32,14 @@ CARDS_DRY_RUN = False
 FORCE_CARDS_SYNC = True
 VERBOSE_DEBUG = True
 
+GH_USE_TEST_REPO = False
 GH_REPO = 'FirefoxGraphics/planning'
 GH_ORG = 'FirefoxGraphics'
+GH_USER = None
+GH_TEST_REPO = 'ktaeleman/planning-test'
+GH_TEST_USER = 'ktaeleman'
+GH_TEST_ORG = None
+
 GH_OLD_REPOS = []
 GH_LABEL = 'bugzilla'
 GH_BZLABEL_PREFIX = 'BZ_'
@@ -114,24 +120,57 @@ class BugSet(object):
     def __len__(self):
         return len(self.bugs)
 
+    def _create_bugzilla_url(self, **kwds):
+        url = BZ_URL + '/bug?include_fields=id,is_open,see_also,whiteboard,depends_on'
+        url += '&' + self._make_query_string(**kwds)
+        if self.api_key is not None:
+            url += '&api_key=' + self.api_key
+        return url
+
+    def get_from_bugzilla_auth(self, **kwds):
+        found_bugs = set()
+        if "blocking" in kwds and len(kwds["blocking"]) != 0:
+            for blocking in kwds["blocking"]:
+                dependencies = blocking["name"]
+                while len(dependencies) != 0:
+                    kwds["id"] = dependencies
+                    url = self._create_bugzilla_url(**kwds)
+                    print("Querying with dependency" + str(dependencies) + ": " + url)
+                    dependencies = []
+                    bugs_result = get_json(url)['bugs']
+                    for bug in bugs_result:
+                        bugid = str(bug['id'])
+                        found_bugs.add(bugid)
+                        
+                        if bugid not in self.bugs:
+                            self.bugs[bugid] = bug
+                            self.bugs[bugid]["whiteboard"] += " " + blocking["name"]
+                            dependencies.extend([str(i) for i in bug['depends_on']])
+                        else:
+                            self.bugs[bugid].update(bug)
+                            if (blocking["name"] not in self.bugs[bugid]["whiteboard"]):
+                                self.bugs[bugid]["whiteboard"] += " " + blocking["name"]
+
+        else:
+            url = self._create_bugzilla_url(**kwds)
+            for bug in get_json(url)['bugs']:
+                bugid = str(bug['id'])
+                found_bugs.add(bugid)
+                if bugid not in self.bugs:
+                    self.bugs[bugid] = bug
+                else:
+                    self.bugs[bugid].update(bug)
+
+        return found_bugs
+
     def update_from_bugzilla(self, **kwds):
         """Slurp in bugs from bugzilla that match the given query keywords."""
         # First, fetch a minimal set of "safe" metadata that we're happy to put in
         # a public github issue, even for confidential bugzilla bugs.
         # This is the only query that's allowed to use a BZ API token to access
         # confidential bug info.
-        url = BZ_URL + '/bug?include_fields=id,is_open,see_also,whiteboard'
-        url += '&' + self._make_query_string(**kwds)
-        if self.api_key is not None:
-            url += '&api_key=' + self.api_key
-        found_bugs = set()
-        for bug in get_json(url)['bugs']:
-            bugid = str(bug['id'])
-            found_bugs.add(bugid)
-            if bugid not in self.bugs:
-                self.bugs[bugid] = bug
-            else:
-                self.bugs[bugid].update(bug)
+        found_bugs = self.get_from_bugzilla_auth(**kwds)
+
         # Now make *unauthenticated* public API queries to fetch additional metadata
         # which we know is safe to make public. Any security-sensitive bugs will be
         # silently omitted from this query.
@@ -159,7 +198,7 @@ class BugSet(object):
                     self.bugs[bugid]['comment0'] = bug['comments'][0]['text']
 
     def _make_query_string(self, product=None, component=None, id=None, resolved=None,
-                           creation_time=None, last_change_time=None, whiteboard=None):
+                           creation_time=None, last_change_time=None, whiteboard=None, blocking=None):
         def listify(x): return x if isinstance(x, (list, tuple, set)) else (x,)
 
         def encode(x): return urllib.parse.quote(x, safe='')
@@ -175,7 +214,7 @@ class BugSet(object):
         if last_change_time is not None:
             qs.append('last_change_time=' + last_change_time)
         if whiteboard is not None:
-            qs.append('status_whiteboard_type=anywords');
+            qs.append('status_whiteboard_type=anywords')
             qs.append('status_whiteboard=' + " ".join([label["name"] for label in whiteboard]))
         if resolved is not None:
             if resolved:
@@ -204,20 +243,25 @@ class MirrorIssueSet(object):
     bugzilla.
     """
 
-    def __init__(self, repo, org, label, api_key=None):
+    def __init__(self, repo, label, org = None, user = None, api_key=None):
         self._gh = Github(api_key)
         self._repo = self._gh.get_repo(repo)
         self._repo_name = repo
         self._labels = self._repo.get_labels()
         self._label = self._repo.get_label(label)
 
-        self._org = self._gh.get_organization(org)
+        if org is not None:
+            self._org = self._gh.get_organization(org)
+        elif user is not None:
+            self._org = self._gh.get_user(user)
+
         self._projects = []
         projects = self._org.get_projects()
         for project in projects:
           project_info = {}
           project_info["project"] = project
           project_info["columns"] = []
+          project_info["added_cards"] = []
           columns = project.get_columns()
           for column in columns:
             column_info = {}
@@ -234,7 +278,11 @@ class MirrorIssueSet(object):
     def get_bugzilla_sync_labels(self):
         """Get all the BZ_ bugzilla whiteboard labels defined in Github that this repository wants to sync"""
         bz_labels = list(filter(lambda label: label.name.startswith(GH_BZLABEL_PREFIX), self._labels))
-        return [{ "name": label.name[len(GH_BZLABEL_PREFIX):], "project": label.description} for label in bz_labels]
+        bz_bugid_regex = r"BZ_[0-9]+"
+        return [{ "name": label.name[len(GH_BZLABEL_PREFIX):], 
+                  "project": label.description, 
+                  "type": "bugid" if re.match(bz_bugid_regex, label.name) else "whiteboard"
+                } for label in bz_labels]
 
     def sync_from_bugset(self, bugs, updates_only=False):
         """Sync the mirrored issues with the given BugSet (which might be modified in-place)."""
@@ -308,14 +356,17 @@ class MirrorIssueSet(object):
     def update_cards_for_issue(self, issue, is_assigned):
         for label in issue.get_labels():
           project = self.get_project_from_label(label)
-          if project:
+          if project and issue.number not in project["added_cards"]:
             current_column, card = self.get_card_from_issue(project, issue)
             target_column = self.get_column_for_issue(project, issue, is_assigned)
+
+            # Check if a card needs to be created or moved
             if not card and target_column:
               if VERBOSE_DEBUG:
                 log('Creating card for issue #{} in {} - {}', issue.number, project['project'].name, target_column['column'].name)
               if not CARDS_DRY_RUN:
-                target_column["column"].create_card(content_type = "Issue", content_id = issue.id)
+                card = target_column["column"].create_card(content_type = "Issue", content_id = issue.id)
+                project["added_cards"].append(issue.number)
             elif target_column and current_column != target_column:
               is_custom_column = not current_column['column'].name.lower() in ['not started', 'to do', 'in progress', 'done']
               # When the issue is in a custom named column, only allow moves to in progress and done. This could be a sprint planning column.
@@ -405,7 +456,7 @@ class MirrorIssueSet(object):
         # only change assignee if the issue is still open
         gh_user = translate_bmo_user_to_gh(bug_info['assigned_to'])
         if gh_user != "" and issue_info['state'] == 'open':
-          issue_info['assignee'] = gh_user
+          issue_info['assignee'] = gh_user if not GH_USE_TEST_REPO else GH_TEST_USER
 
         if issue is None:
             issue_info['labels'] = [self._label]
@@ -458,14 +509,29 @@ def sync_bugzilla_to_github():
 
     log('Finding relevant bugs in bugzilla...')
     bugs = BugSet(os.environ.get('BZ_API_KEY'))
-    issues = MirrorIssueSet(GH_REPO, GH_ORG, GH_LABEL, gh_token)
-    bugs.update_from_bugzilla(product='Core',
-                              resolved=False, whiteboard=issues.get_bugzilla_sync_labels())
+    issues = None
+    if GH_USE_TEST_REPO:
+        issues = MirrorIssueSet(GH_TEST_REPO, GH_LABEL, org=GH_TEST_ORG, user=GH_TEST_USER, api_key=gh_token)
+    else:
+        issues = MirrorIssueSet(GH_REPO, GH_LABEL, org=GH_ORG, user=GH_USER, api_key=gh_token)
+
+    labels = issues.get_bugzilla_sync_labels()
+    whiteboard_labels = list(filter(lambda label: label['type'] == "whiteboard", labels))
+    blocking_labels = list(filter(lambda label: label['type'] == "bugid", labels))
+
+    bugs.update_from_bugzilla(product=['Core','Firefox','GeckoView'],
+                              resolved=False, 
+                              whiteboard=whiteboard_labels
+                             )
+    
+    bugs.update_from_bugzilla(product=['Core','Firefox','GeckoView'],
+                              resolved=False, 
+                              blocking=blocking_labels
+                             )
+    
     # bugs.update_from_bugzilla(product='Firefox', component='Sync',
     #                           resolved=False, creation_time=MIN_CREATION_TIME)
     log('Found {} bugzilla bugs', len(bugs))
-
-
 
     # Find any that are already represented in old github repos.
     # We don't want to make duplicates of them in the current repo!
