@@ -8,11 +8,12 @@ This script is run every 15 minutes.
 
 ### Synchronizing bugs
 
-The list of bugzilla issues being synchronized is controlled by the [Github labels](https://github.com/FirefoxGraphics/planning/labels) with the prefix BZ_ in this repository and corresponding whiteboard label without the BZ_ prefix in bugzilla.
-
+The list of bugzilla issues being synchronized is controlled by the [Github labels](https://github.com/FirefoxGraphics/planning/labels) with the prefix BZ_ in this repository.
+The labels can sync whiteboard tags from bugzilla and/or bug dependencies.
 
 For example:
 When a github label named 'BZ_wr-android' exists, it will find all open bugzilla issues with the whiteboard label 'wr-android' and create/update the corresponding github issues.
+When a github label named 'BZ_1624521' is encountered, it will sync all dependencies of that issues and apply the label to them.
 When an issue is resolved on the bugzilla side, it will be closed on the github side.
 
 This allows us to drag the issues into [github projects](https://github.com/orgs/FirefoxGraphics/projects) by filtering the label in the 'Add Cards' menu item like: `is:open label:BZ_desktop-zoom-nightly`.
