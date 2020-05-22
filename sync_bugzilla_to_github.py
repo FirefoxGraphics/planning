@@ -130,6 +130,7 @@ class BugSet(object):
     def get_from_bugzilla_auth(self, **kwds):
         found_bugs = set()
         if "blocking" in kwds and len(kwds["blocking"]) != 0:
+            dependencies_scanned = []
             for blocking in kwds["blocking"]:
                 dependencies = blocking["name"]
                 while len(dependencies) != 0:
@@ -145,11 +146,13 @@ class BugSet(object):
                         if bugid not in self.bugs:
                             self.bugs[bugid] = bug
                             self.bugs[bugid]["whiteboard"] += " " + blocking["name"]
-                            dependencies.extend([str(i) for i in bug['depends_on']])
                         else:
                             self.bugs[bugid].update(bug)
                             if (blocking["name"] not in self.bugs[bugid]["whiteboard"]):
                                 self.bugs[bugid]["whiteboard"] += " " + blocking["name"]
+                        
+                        if bugid not in dependencies_scanned:
+                            dependencies.extend([str(i) for i in bug['depends_on']])
 
         else:
             url = self._create_bugzilla_url(**kwds)
